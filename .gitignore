@@ -2,3 +2,5 @@ wifi.py
 uosc
 .vscode
 .picowgo
+.DS_Store
+data
