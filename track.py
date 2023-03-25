@@ -113,7 +113,7 @@ def find_closet_track(screen, starting_point, point, track, scale):
     pygame.draw.circle(screen, (0, 0, 255), rail_center_points[np.argmin(distances)], 20, 0)
 
 def main():
-    model = Model.load('train_model_test.model')
+    model = Model.load('train_model_classification.model')
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_ip = socket.getaddrinfo("0.0.0.0", 9000, socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(server_ip[0][4])
@@ -141,86 +141,69 @@ def main():
     train_point = None
     prev_train_point = None
     tie_count = 0
+
+    distance_right_norm = 0
+    distance_left_norm = 0
+
+
     pygame.init()
     screen = pygame.display.set_mode((1000, 1000))
-    
-    position1 = []
-    position2 = []
-    position3 = []
-    position4 = []
-    position5 = []
-    position6 = []
+    data_array = []
+    learning_data = []
+    roundcount = 1
+    new_round_threshold_reached = 0
+
     running = True
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-    
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_r:
+                    filename = "data/round" + str(roundcount) + ".npy"
+                    np.save(filename, learning_data)
+                    roundcount += 1
+                    learning_data = []
+
         addr, value = read_packet(sock)
         if addr == None:
             pass
-        if addr == "/tie_count":
-            tie_count = value[0]
-            #print(addr)
-        if addr == "/color":
-            print(value[0], value[1], value[2])
-        if addr == "/data":
-            position = value[0]
-            distance_left_norm = value[1]
-            distance_right_norms = value[2]
-            magnetox_norm = value[3]
-            magnetoy_norm = value[4]
-            magnetoz_norm = value[5]
-            data_array=[distance_left_norm, distance_right_norms, magnetox_norm, magnetoy_norm, magnetoz_norm]
-            print(data_array)
-            if position == 1:
-                position1.append(data_array)
-                np.save("data/position1.npy", position1)
-            elif position == 2:
-                position2.append(data_array)
-                np.save("data/position2.npy", position2)
-            elif position == 3:
-                position3.append(data_array)
-                np.save("data/position3.npy", position3)
-            elif position == 4:
-                position4.append(data_array)
-                np.save("data/position4.npy", position4)
-            elif position == 5:
-                position5.append(data_array)
-                np.save("data/position5.npy", position5)
-            elif position == 6:
-                position6.append(data_array)
-                np.save("data/position6.npy", position6)
-            
+
         if addr == "/sensors":
-            distance_left_norm = value[0]
-            distance_right_norms = value[1]
+            distance_right_norm = value[0]
+            distance_left_norm = value[1]
             magnetox_norm = value[2]
             magnetoy_norm = value[3]
             magnetoz_norm = value[4]
-            data_array=[distance_left_norm, distance_right_norms, magnetox_norm, magnetoy_norm, magnetoz_norm]
-
+            accelx_norm = value[5]
+            accely_norm = value[6]
+            accelz_norm = value[7]
+            gyrox_norm = value[8]
+            gyroy_norm = value[9]
+            gyroz_norm = value[10]
+            speed_norm = value[11]
+            
+            data_array = value
+            #learning_data.append(data_array)
+            #print(data_array)
             confidences = model.predict(data_array)
 
             # Get prediction instead of confidence levels
             predictions = model.output_layer_activation.predictions(confidences)
 
-            if(np.max(confidences) > 0.97):
-                if predictions[0] + 1 == 1:
-                    tie_count = 1
-                elif predictions[0] + 1 == 2:
-                    tie_count = 7
-                elif predictions[0] + 1 == 3:
-                    tie_count = 11
-                elif predictions[0] + 1 == 4:
-                    tie_count = 13
-                elif predictions[0] + 1 == 5:
-                    tie_count = 19
-                elif predictions[0] + 1 == 6:
-                    tie_count = 24
-            print(tie_count)
-                
-
+            if(np.max(confidences) > 0.8):
+                 tie_count = 1 + predictions[0]
+            #print(data_array)
+            #print(distance_left_norm, distance_right_norm)
+            #if distance_left_norm < -.97 and distance_right_norm < -0.97:
+            #    new_round_threshold_reached = 1
+            #elif new_round_threshold_reached == 1:
+            #        print("new round")
+            #        filename = "data/roundv2-" + str(roundcount) + ".npy"
+            #        np.save(filename, learning_data)
+            #        roundcount += 1
+            #        learning_data = []               
+            #        new_round_threshold_reached = 0
 
         screen.fill((0,0,0))
         draw_track(screen, starting_point, track, scale)

@@ -1,9 +1,15 @@
 from uosc.client import Client
 from uosc.server import parse_message
-from machine import Pin, PWM, I2C
-import VL53L0X
-from mpu9250 import MPU9250
+from machine import Pin, PWM
+import board
+import busio
+import digitalio
 import time
+import paa5100ej
+import adafruit_vl53l1x
+from roboticsmasters_mpu9250 import MPU9250
+import time
+import math
 import network
 import socket
 import rp2
@@ -13,10 +19,8 @@ ENA = 0
 IN1 = 1
 IN2 = 2
 
-SDA = 10
-SCL = 11
-
 left_sensor_power = 13
+right_sensor_power = 15
 
 class Motor:
     def __init__(self, EN, IN1, IN2, frequency = 500):
@@ -43,44 +47,107 @@ class Motor:
 class SensorPackage:
     def __init__(self):
         self.left_sensor_power = Pin(left_sensor_power, Pin.OUT)
+        self.right_sensor_power = Pin(right_sensor_power, Pin.OUT)
+        self.i2c = board.I2C()
+        self.spi = board.SPI()
+        self.cs = digitalio.DigitalInOut(board.GP5)
+        self.cs.direction = digitalio.Direction.OUTPUT
+
+        self.optical_flow = paa5100ej.PAA5100EJ(self.spi, self.cs)
+        self.optical_flow.set_rotation(0)
+
+
+        self.right_sensor_power.on()
         self.left_sensor_power.off()
-        self.i2c = I2C(1, scl=Pin(SCL), sda=Pin(SDA))
         print(self.i2c.scan())
 
         time.sleep_ms(200)
-        self.distance_sensor_right = VL53L0X.VL53L0X(self.i2c, address=0x29)
-        self.distance_sensor_right.change_address(0x30)
-        time.sleep_ms(200)
-        self.distance_sensor_right = VL53L0X.VL53L0X(self.i2c, address=0x30)
+        try:
+            self.distance_sensor_right = adafruit_vl53l1x.VL53L1X(self.i2c, address=0x30)
+        except:
+            self.distance_sensor_right = adafruit_vl53l1x.VL53L1X(self.i2c, address=0x29)
+            self.distance_sensor_right.set_address(0x30)
+            time.sleep_ms(200)
+            self.distance_sensor_right = adafruit_vl53l1x.VL53L1X(self.i2c, address=0x30)
         self.left_sensor_power.on()
         time.sleep_ms(200)
-        self.distance_sensor_left = VL53L0X.VL53L0X(self.i2c, address=0x29)
+        self.distance_sensor_left = adafruit_vl53l1x.VL53L1X(self.i2c, address=0x29)
 
-        #self.distance_sensor_right.set_Vcsel_pulse_period(self.distance_sensor_right.vcsel_period_type[0], 18)
-        #self.distance_sensor_right.set_Vcsel_pulse_period(self.distance_sensor_right.vcsel_period_type[1], 14)
+        self.distance_sensor_left.start_ranging()
+        self.distance_sensor_right.start_ranging()
         
-        #self.distance_sensor_left.set_Vcsel_pulse_period(self.distance_sensor_left.vcsel_period_type[0], 18)
-        #self.distance_sensor_left.set_Vcsel_pulse_period(self.distance_sensor_left.vcsel_period_type[1], 14)
+        self.distance_sensor_left.distance_mode = 2
+        self.distance_sensor_right.distance_mode = 2
+        
+        self.distance_sensor_left.timing_budget = 33
+        self.distance_sensor_right.timing_budget = 33
 
-        self.magneto_sensor = MPU9250(self.i2c)
+        
+        print(self.i2c.scan())
+
+        self.magneto_sensor = MPU9250(self.i2c, mpu_addr=0x68)
         self.distance_right = 0
         self.distance_left = 0
+        self.last_distance_left = 0
+        self.last_distance_right = 0
+
         self.magnetox = 0
         self.magnetoy = 0
         self.magnetoy = 0
+
+        self.speed = 0
+
+        
         
 
     def read_sensors(self):
-        self.distance_right = min(4000, self.distance_sensor_right.read())
-        self.distance_left = min(4000, self.distance_sensor_left.read())
+        self.distance_right = self.distance_sensor_right.distance
+        self.distance_left = self.distance_sensor_left.distance
+        if self.distance_right == None:
+            self.distance_right = 400
+
+        if self.distance_left == None:
+            self.distance_left = 400
 
         self.magneto = self.magneto_sensor.magnetic
+        self.gyro = self.magneto_sensor.gyro
+        self.acceleration = self.magneto_sensor.acceleration
+        
+        motiondata = self.optical_flow.get_motion()
+        if motiondata is not None:
+            x, y = motiondata
+        else:
+            x, y = 0, 0
+        self.speed = math.sqrt(x ** 2 + y ** 2)
 
-        self.distance_right_norm = (self.distance_right / 2000) - 1
-        self.distance_left_norm = (self.distance_left / 2000) - 1
+        self.distance_right_norm = (self.distance_right / 400) - 1
+        self.distance_left_norm = (self.distance_left / 400) - 1
+
         self.magnetox_norm = (self.magneto[0] / 128)
         self.magnetoy_norm = (self.magneto[1] / 128)
         self.magnetoz_norm = (self.magneto[2] / 128)
+
+        self.accelx_norm = (self.acceleration[0] / 128)
+        self.accely_norm = (self.acceleration[1] / 128)
+        self.accelz_norm = (self.acceleration[2] / 128)
+
+        self.gyrox_norm = (self.gyro[0] / 128)
+        self.gyroy_norm = (self.gyro[1] / 128)
+        self.gyroz_norm = (self.gyro[2] / 128)
+
+        self.speed_norm = (self.speed / 100)
+
+        self.last_distance_right = self.distance_right
+        self.last_distance_left = self.distance_left
+        
+        time.sleep_ms(50)
+
+        return self.distance_right_norm, self.distance_left_norm, \
+            self.magnetox_norm, self.magnetoy_norm, self.magnetoz_norm, \
+            self.accelx_norm, self.accely_norm, self.accelz_norm, \
+            self.gyrox_norm, self.gyroy_norm, self.gyroz_norm, \
+            self.speed_norm
+
 
     
 def wapCreate():
@@ -138,33 +205,14 @@ def main():
                 speed = (value[0] - 0.5) * 2 * 100
                 if -1 <= speed <= 1:
                     speed = 0
-                #print(speed)
-            if addr == "/button1":
-                sensor_package.read_sensors()
-                osc.send('/data', 1, sensor_package.distance_left_norm, sensor_package.distance_right_norm, sensor_package.magnetox_norm, sensor_package.magnetoy_norm, sensor_package.magnetoz_norm)
-
-            if addr == "/button2":
-                sensor_package.read_sensors()
-                osc.send('/data', 2, sensor_package.distance_left_norm, sensor_package.distance_right_norm, sensor_package.magnetox_norm, sensor_package.magnetoy_norm, sensor_package.magnetoz_norm)
-
-            if addr == "/button3":
-                sensor_package.read_sensors()
-                osc.send('/data', 3, sensor_package.distance_left_norm, sensor_package.distance_right_norm, sensor_package.magnetox_norm, sensor_package.magnetoy_norm, sensor_package.magnetoz_norm)
-
-            if addr == "/button4":
-                sensor_package.read_sensors()
-                osc.send('/data', 4, sensor_package.distance_left_norm, sensor_package.distance_right_norm, sensor_package.magnetox_norm, sensor_package.magnetoy_norm, sensor_package.magnetoz_norm)
-
-            if addr == "/button5":
-                sensor_package.read_sensors()
-                osc.send('/data', 5, sensor_package.distance_left_norm, sensor_package.distance_right_norm, sensor_package.magnetox_norm, sensor_package.magnetoy_norm, sensor_package.magnetoz_norm)
-
-            if addr == "/button6":
-                sensor_package.read_sensors()
-                osc.send('/data', 6, sensor_package.distance_left_norm, sensor_package.distance_right_norm, sensor_package.magnetox_norm, sensor_package.magnetoy_norm, sensor_package.magnetoz_norm)
 
         sensor_package.read_sensors()
-        osc.send('/sensors',sensor_package.distance_left_norm, sensor_package.distance_right_norm, sensor_package.magnetox_norm, sensor_package.magnetoy_norm, sensor_package.magnetoz_norm)
+        #print("left: ",sensor_package.distance_left_norm, "right: ",sensor_package.distance_right_norm)
+        osc.send('/sensors',sensor_package.distance_right_norm, sensor_package.distance_left_norm, \
+            sensor_package.magnetox_norm, sensor_package.magnetoy_norm, sensor_package.magnetoz_norm, \
+            sensor_package.accelx_norm, sensor_package.accely_norm, sensor_package.accelz_norm, \
+            sensor_package.gyrox_norm, sensor_package.gyroy_norm, sensor_package.gyroz_norm, \
+            sensor_package.speed_norm)
         motor.rotate(speed)
 
 if __name__ == "__main__":

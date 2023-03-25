@@ -1,6 +1,11 @@
 wifi.py
 uosc
+data
+lib
+models
+data
 .vscode
 .picowgo
 .DS_Store
-data
+test.py
+testest.py
