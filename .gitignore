@@ -9,3 +9,7 @@ data
 .DS_Store
 test.py
 testest.py
+test_append_arrays.py
+test_compare_similarity.py
+test_train_simulator.py
+error.log

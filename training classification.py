@@ -61,7 +61,7 @@ model.add(Activation_ReLU())
 model.add(Layer_Dense(60, 26))
 model.add(Activation_Softmax())
 
-model.set( loss=Loss_CategoricalCrossentropy(), optimizer=Optimizer_Adam(decay=5e-4), accuracy=Accuracy_Categorical())
+model.set(loss=Loss_CategoricalCrossentropy(), optimizer=Optimizer_Adam(decay=5e-4), accuracy=Accuracy_Categorical())
 
 model.finalize()
 

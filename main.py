@@ -1,3 +1,4 @@
+print("starting imports")
 from uosc.client import Client
 from uosc.server import parse_message
 from machine import Pin, PWM
@@ -14,6 +15,9 @@ import network
 import socket
 import rp2
 import wifi
+import sys
+import uio
+print("imports done")
 
 ENA = 0
 IN1 = 1
@@ -113,7 +117,7 @@ class SensorPackage:
         self.gyro = self.magneto_sensor.gyro
         self.acceleration = self.magneto_sensor.acceleration
         
-        motiondata = self.optical_flow.get_motion()
+        motiondata = self.optical_flow.get_motion(0.5)
         if motiondata is not None:
             x, y = motiondata
         else:
@@ -140,7 +144,7 @@ class SensorPackage:
         self.last_distance_right = self.distance_right
         self.last_distance_left = self.distance_left
         
-        time.sleep_ms(50)
+        time.sleep_ms(55)
 
         return self.distance_right_norm, self.distance_left_norm, \
             self.magnetox_norm, self.magnetoy_norm, self.magnetoz_norm, \
@@ -205,6 +209,7 @@ def main():
                 speed = (value[0] - 0.5) * 2 * 100
                 if -1 <= speed <= 1:
                     speed = 0
+                print(speed)
 
         sensor_package.read_sensors()
         #print("left: ",sensor_package.distance_left_norm, "right: ",sensor_package.distance_right_norm)
@@ -216,26 +221,18 @@ def main():
         motor.rotate(speed)
 
 if __name__ == "__main__":
-    main()
-
-"""
-i2c = I2C(0)
-i2c = I2C(0, I2C.MASTER)
-i2c = I2C(0, pins=('P10','P9'))
-i2c.init(I2C.MASTER, baudrate=9600)
-
-# Create a VL53L0X object
-tof = VL53L0X.VL53L0X(i2c)
-
-tof.set_Vcsel_pulse_period(tof.vcsel_period_type[0], 18)
-
-tof.set_Vcsel_pulse_period(tof.vcsel_period_type[1], 14)
-
-
-while True:
-# Start ranging
-    tof.start()
-    tof.read()
-    print(tof.read())
-    tof.stop()
-"""
+    while True:
+        try:
+            log_file = open("error.log", "a")
+            main()
+        except Exception as e:
+            # Catch the exception and write the error message to the log file
+            error_message = "An error occurred: {}\n".format(e)
+            log_file.write(error_message)
+            # Print the error message with traceback to the console for debugging
+            tb_str = uio.StringIO()
+            sys.print_exception(e, tb_str)
+            traceback_str = tb_str.getvalue()
+            sys.stderr.write(traceback_str)
+            log_file.write(traceback_str)
+        log_file.close()

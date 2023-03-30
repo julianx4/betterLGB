@@ -4,227 +4,312 @@ import numpy as np
 from uosc.server import parse_message
 import socket
 from nnfs_model import *
+import os.path
+import time
+import matplotlib.pyplot as plt
+import multiprocessing
+import sys
 
-class rail:
-    def __init__(self, length = 0.0, radius = 0.0, angle = 0.0, direction = 0, ties = 0, color = None):
-        self.length = length
-        self.radius = radius
-        self.angle = angle
-        self.direction = direction
-        self.ties = ties
-        if length > 0:
-            self.x = length
-            self.y = 0
-        else:
-            self.x = abs(math.sin(math.radians(self.angle)) * self.radius)
-            if self.direction < 0:
-                self.y = self.radius - (math.cos(math.radians(self.angle)) * self.radius)
-            if self.direction > 0:
-                self.y = -(self.radius - (math.cos(math.radians(self.angle)) * self.radius))
+np.set_printoptions(precision=3, floatmode="fixed", suppress=True, linewidth=200)
 
-    def show_rail(self):
-        return self.length, self.radius, self.angle, self.direction
+class Track:
+    def __init__(self, filename):
+        self.cumulative_angle_average = np.array([])
+        self.firsttrack = []
+        self.width = 1000
+        self.height = 1000
+        self.margin = 100
+        self.startingx = 0
+        self.startingy = 0
+        self.angle = 0
+        self.scale_factor = 0
+        self.filename = filename
+        self.load_track(self.filename)
+        self.offset_x = 0
+        self.offset_y = 0
 
-def read_packet(sock):
-    try:
-        pkt = sock.recv(200)
-        if not pkt:
-            return None, None
-        else:
-            addr, tags, value = parse_message(pkt)
-            return addr, value
-    except:
-        return None, None
+        self.sensor_inputs = 12
+        self.output_neurons = 26
+        self.layer_neurons = 60
+        self.modelX = np.array([])
+        self.modely = np.array([])
+        self._init_model()
 
-def draw_track(screen, starting_point, track, scale):
-    angle = 180
-    
-    for i in range(0, len(track)):
-        rot_angle = math.radians(angle + track[i].angle * track[i].direction)
-        rot_matrix = np.array([[math.cos(rot_angle), -math.sin(rot_angle)], [math.sin(rot_angle), math.cos(rot_angle)]])
-        angle = math.degrees(rot_angle)
+        self.sensor_queue = multiprocessing.Queue()
+        self.full_round_queue = multiprocessing.Queue()
+        self.model_parameters_queue = multiprocessing.Queue()
+        self.rounds_traveled = 0
 
-        track_vector_unrot = np.array([track[i].x * scale, track[i].y * scale])
-        track_vector = np.dot(rot_matrix, track_vector_unrot)
-        end_point = np.add(starting_point, track_vector)
-        if track[i].length == 0:
-            pygame.draw.line(screen, (255, 255, 255), starting_point, end_point)
-        else:
-            pygame.draw.line(screen, (255, 255, 255), starting_point, end_point)
-        starting_point = end_point
+    def update_track(self, track_array):
+        gyro_array = track_array[:, [10]]
+        gyro_factor = 1
+        
+        cumulative_angle = np.cumsum(gyro_array * gyro_factor)
+        print(gyro_factor,cumulative_angle[-1])
+        while abs(cumulative_angle[-1] - 360) > 0.2 or abs(cumulative_angle[-1] < 0.2):
+            if (cumulative_angle[-1] > 360): #or (cumulative_angle[-1] < 0):
+                gyro_factor += 0.01
+            else:
+                gyro_factor -= 0.01
+            cumulative_angle = np.cumsum(gyro_array * gyro_factor)
+            #print(gyro_factor,cumulative_angle[-1])
+        
+        if self.cumulative_angle_average.size == 0:
+            self.cumulative_angle_average = cumulative_angle
+            self.firsttrack = self.cumulative_angle_average
 
-def train_position(starting_point, track, tie_count, scale): 
-    angle = 180
-    track_length = 0
-    track_length_temp = 0
-    elapsed_rail_ties = 0
-    current_track = 0
-    train_position = 0
-    train_point = None
+        if len(cumulative_angle) < len(self.cumulative_angle_average):
+            new_length = min(len(cumulative_angle), len(self.cumulative_angle_average))
+            indices_new = np.linspace(0, len(self.cumulative_angle_average) - 1, new_length)
+            self.cumulative_angle_average = np.interp(indices_new, np.arange(len(self.cumulative_angle_average)), self.cumulative_angle_average)
+            
+        elif len(cumulative_angle) > len(self.cumulative_angle_average):
+            new_length = min(len(cumulative_angle), len(self.cumulative_angle_average))
+            indices_new = np.linspace(0, len(cumulative_angle) - 1, new_length)
+            cumulative_angle = np.interp(indices_new, np.arange(len(cumulative_angle)), cumulative_angle)
 
-    for i in range(0, len(track)):
-        track_length += track[i].ties
-    train_position = tie_count % track_length
+        similarity = self._check_track_similarity(cumulative_angle, self.firsttrack)
+        #print(similarity)
+        if similarity > 0.97:
+            self.cumulative_angle_average = (cumulative_angle + self.cumulative_angle_average) / 2
+        
+        self._update_scale_and_offset_factor()
+        return self.cumulative_angle_average
 
-    for i in range(0, len(track)):
-        track_length_temp += track[i].ties
-        if track_length_temp > train_position:
-            current_track = i
-            break
+    def draw_track(self, screen):
+        x = self.startingx
+        y = self.startingy
+        for i in range(len(self.cumulative_angle_average)):
+            radians = np.radians(self.cumulative_angle_average[i])
+            
+            delta_x = self.scale_factor * np.cos(radians)
+            delta_y = self.scale_factor * np.sin(radians)
+            xprev = x
+            yprev = y
+            x -= delta_x
+            y += delta_y
+            
+            offset_startpoint = (x + self.offset_x, y + self.offset_y)
+            offset_endpoint = (xprev + self.offset_x, yprev + self.offset_y)
 
-    for i in range(0, len(track)):
-        rot_angle = math.radians(angle + track[i].angle * track[i].direction)
-        rot_matrix = np.array([[math.cos(rot_angle), -math.sin(rot_angle)], [math.sin(rot_angle), math.cos(rot_angle)]])
-        angle = math.degrees(rot_angle)
+            pygame.draw.line(screen, (255, 255, 255), offset_startpoint, offset_endpoint)
 
-        track_vector_unrot = np.array([track[i].x * scale, track[i].y * scale])
-        track_vector = np.dot(rot_matrix, track_vector_unrot)
-        end_point = np.add(starting_point, track_vector)
-        if current_track == i:
-            for a in range(0, i, 1): 
-                elapsed_rail_ties += track[a].ties
-            current_rail_elapsed_ties = train_position - elapsed_rail_ties
+    def draw_train(self, screen, location):
+        x = self.startingx
+        y = self.startingy
 
-            current_rail_ties = track[current_track].ties
-            train_point = starting_point + (track_vector / current_rail_ties * current_rail_elapsed_ties)
+        loopyloop = int(location / self.output_neurons * len(self.cumulative_angle_average))
 
-        starting_point = end_point
-    return train_point
+        for i in range(loopyloop):
+            radians = np.radians(self.cumulative_angle_average[i])
+            
+            delta_x = self.scale_factor * np.cos(radians)
+            delta_y = self.scale_factor * np.sin(radians)
 
-def find_closet_track(screen, starting_point, point, track, scale):
-    angle = 180
-    rail_center_points = [0] * len(track)
-    distances = [0] * len(track)
-    
-    for i in range(0, len(track)):
-        rot_angle = math.radians(angle + track[i].angle * track[i].direction)
-        rot_matrix = np.array([[math.cos(rot_angle), -math.sin(rot_angle)], [math.sin(rot_angle), math.cos(rot_angle)]])
-        angle = math.degrees(rot_angle)
+            x -= delta_x
+            y += delta_y
+        offset_trainpoint = (x + self.offset_x, y + self.offset_y)
+            
+        pygame.draw.circle(screen, (255, 0, 255), offset_trainpoint, 10, 0)
 
-        track_vector_unrot = np.array([track[i].x * scale, track[i].y * scale])
-        track_vector = np.dot(rot_matrix, track_vector_unrot)
-        end_point = np.add(starting_point, track_vector)
+    def save_track(self):
+        np.save(self.filename, self.cumulative_angle_average)
 
-        rail_center_point = starting_point + track_vector / 2
-        starting_point = end_point
-        rail_center_points[i] = rail_center_point
-        distances[i] = np.linalg.norm(rail_center_point - point)
+    def load_track(self, filename):
+        if os.path.isfile(filename):
+            self.cumulative_angle_average = np.load(filename, allow_pickle=True)
 
-    pygame.draw.circle(screen, (0, 0, 255), rail_center_points[np.argmin(distances)], 20, 0)
+    def update_train_model(self, new_round_array):
+        new_round_array = np.array(new_round_array)
+        np.linspace(0, 1, self.output_neurons)
+        steps = np.linspace(0, 1, self.output_neurons)
+
+        count = 0
+        originalshape = new_round_array.shape
+        scaled_steps = new_round_array.shape[0] * steps
+        for step in scaled_steps[:-1]:
+            self.modelX = np.append(self.modelX, new_round_array[int(step)])
+            self.modely = np.append(self.modely, count)
+            count += 1
+        self.modely = np.array(self.modely).astype('uint8')
+        self.modelX = self.modelX.reshape((len(self.modelX)//originalshape[1]),originalshape[1])    
+        self.model.train(self.modelX, self.modely, epochs=450, batch_size=None, print_every=10000) #validation_data=(self.modelX, self.modely),
+        self.model_parameters_queue.put(self.model.get_parameters())
+
+    def receive_sensor_data(self, sock):
+        value = None
+        distance_right_norm = 0
+        distance_left_norm = 0
+        start_recording_learningdata = 0
+        new_round_threshold_reached = 0
+        gate_last_measured = time.time()
+        
+        track_data_list = []
+        data_array = []
+        
+        while True:
+            try:
+                pkt = sock.recv(200)
+                if not pkt:
+                    addr, value = None, None
+                else:
+                    addr, tags, value = parse_message(pkt)
+            except:
+                addr, value = None, None
+
+            if addr == "/sensors":
+                data_array = value
+                distance_right_norm = data_array[0]
+                distance_left_norm = data_array[1]
+                magnetox_norm = data_array[2]
+                magnetoy_norm = data_array[3]
+                magnetoz_norm = data_array[4]
+                accelx_norm = data_array[5]
+                accely_norm = data_array[6]
+                accelz_norm = data_array[7]
+                gyrox_norm = data_array[8]
+                gyroy_norm = data_array[9]
+                gyroz_norm = data_array[10]
+                speed_norm = data_array[11]
+
+                self.sensor_queue.put(data_array)
+
+                if start_recording_learningdata == 1:
+                    track_data_list.append(data_array)
+                
+                if distance_left_norm < -.96 and distance_right_norm < -0.96:
+                    if time.time() - gate_last_measured > 3:
+                        print("pillars")
+                        new_round_threshold_reached = 1
+                        gate_last_measured = time.time()
+                    start_recording_learningdata = 1
+
+                elif new_round_threshold_reached == 1:
+                    print("new round")
+                    new_round_threshold_reached = 0
+                    
+                    if self.rounds_traveled > 0:
+                        self.full_round_queue.put(track_data_list)
+
+                    track_data_list = []   
+                    self.rounds_traveled += 1
+
+    def _init_model(self):
+        self.model = Model()
+        self.model.add(Layer_Dense(self.sensor_inputs, self.layer_neurons))
+        self.model.add(Activation_ReLU())
+        self.model.add(Layer_Dense(self.layer_neurons, self.layer_neurons))
+        self.model.add(Activation_ReLU())
+        self.model.add(Layer_Dense(self.layer_neurons, self.output_neurons))
+        self.model.add(Activation_Softmax())
+        self.model.set(loss=Loss_CategoricalCrossentropy(), optimizer=Optimizer_Adam(decay=5e-4), accuracy=Accuracy_Categorical())
+        self.model.finalize()
+
+    def _check_track_similarity(self, arr1, arr2):
+        if len(arr1) < len(arr2):
+            new_length = min(len(arr1), len(arr2))
+            indices_new = np.linspace(0, len(arr2) - 1, new_length)
+            arr2 = np.interp(indices_new, np.arange(len(arr2)), arr2)
+
+        elif len(arr1) > len(arr2):
+            new_length = min(len(arr1), len(arr2))
+            indices_new = np.linspace(0, len(arr1) - 1, new_length)
+            arr1 = np.interp(indices_new, np.arange(len(arr1)), arr1)
+
+        #cos_sim = np.dot(arr2, arr1) / (np.linalg.norm(arr2) * np.linalg.norm(arr1)) #another way to compare similarity
+        corr_coef = np.corrcoef(arr1, arr2)[0, 1]
+        return(corr_coef)
+
+    def _update_scale_and_offset_factor(self):
+        x = self.startingx
+        y = self.startingy
+        initial_scale_factor = 1
+        x_list = []
+        y_list = []
+
+        for i in range(len(self.cumulative_angle_average)):
+            radians = np.radians(self.cumulative_angle_average[i])
+            delta_x = initial_scale_factor * np.cos(radians)
+            delta_y = initial_scale_factor * np.sin(radians)
+            x -= delta_x
+            y += delta_y
+            x_list = np.append(x_list, x)
+            y_list = np.append(y_list, y)
+
+        x_min, x_max = np.min(x_list), np.max(x_list)
+        y_min, y_max = np.min(y_list), np.max(y_list)
+        track_width = x_max - x_min
+        track_height = y_max - y_min
+        x_scale = (self.width - self.margin * 2) / track_width
+        y_scale = (self.height - self.margin * 2) / track_height
+        scale = min(x_scale, y_scale)
+
+        x_offset = (self.width - track_width * scale) / 2 - x_min * scale - self.margin / 2
+        y_offset = (self.height - track_height * scale) / 2 + y_min * scale + self.margin / 2
+
+        self.scale_factor = scale
+        self.offset_x = x_offset 
+        self.offset_y = y_offset 
+        return
 
 def main():
-    model = Model.load('train_model_classification.model')
+    multiprocessing.set_start_method("fork")
+    track = Track("data/track.npz")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_ip = socket.getaddrinfo("0.0.0.0", 9000, socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(server_ip[0][4])
     sock.setblocking(0)
-    print(server_ip[0][4])
     
-    scale = 200 # pixels / meter
-    starting_point = np.array([400, 200])
-    
-    straight30 = rail(length = .30, ties = 1)
-    straight30_color = rail(length = .30, ties = 1)
-    straight30_start = rail(length = .30, ties = 1)
-
-    left30 = rail(radius = .6, angle = 30, direction = -1, ties = 1)
-    left30_color = rail(radius = .6, angle = 30, direction = -1, ties = 1)
-
-    right30 = rail(radius = .6, angle = 30, direction = 1, ties = 1)
-    right30_color = rail(radius = .6, angle = 30, direction = 1, ties = 1)
-
-    switch = rail(length = .30, ties = 0)
-
-    track = [straight30, straight30, straight30, left30, left30, left30, left30, 
-        left30, left30, right30, right30, right30, left30, left30, left30, left30, 
-        left30, left30, straight30, straight30, straight30, straight30, left30, left30, left30, straight30]
-    train_point = None
-    prev_train_point = None
-    tie_count = 0
-
-    distance_right_norm = 0
-    distance_left_norm = 0
-
-
     pygame.init()
-    screen = pygame.display.set_mode((1000, 1000))
-    data_array = []
-    learning_data = []
-    roundcount = 1
-    new_round_threshold_reached = 0
+    screen = pygame.display.set_mode((track.width, track.height))
+    clock = pygame.time.Clock()
+    FPS = 60
 
+    location = 0
+    sensor_data = []
+    full_round_list= []
+
+    get_sensor_data_process = multiprocessing.Process(target=track.receive_sensor_data,args=(sock,))
+    get_sensor_data_process.start()
+    
     running = True
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r:
-                    filename = "data/round" + str(roundcount) + ".npy"
-                    np.save(filename, learning_data)
-                    roundcount += 1
-                    learning_data = []
+        if not track.model_parameters_queue.empty():
+            track.model.set_parameters(track.model_parameters_queue.get())
+        if not track.sensor_queue.empty():
+            sensor_data = np.array(track.sensor_queue.get())
+            confidences = track.model.predict(sensor_data)
+            predictions = track.model.output_layer_activation.predictions(confidences)
 
-        addr, value = read_packet(sock)
-        if addr == None:
-            pass
-
-        if addr == "/sensors":
-            distance_right_norm = value[0]
-            distance_left_norm = value[1]
-            magnetox_norm = value[2]
-            magnetoy_norm = value[3]
-            magnetoz_norm = value[4]
-            accelx_norm = value[5]
-            accely_norm = value[6]
-            accelz_norm = value[7]
-            gyrox_norm = value[8]
-            gyroy_norm = value[9]
-            gyroz_norm = value[10]
-            speed_norm = value[11]
+            if(np.max(confidences) > 0.9):
+                location = predictions[0]
+            #print(confidences)
             
-            data_array = value
-            #learning_data.append(data_array)
-            #print(data_array)
-            confidences = model.predict(data_array)
+        if not track.full_round_queue.empty():
+            full_round_list = np.array(track.full_round_queue.get())
+            track.update_track(full_round_list)
+            NN_training_process = multiprocessing.Process(target=track.update_train_model,args=(full_round_list,))
+            if not NN_training_process.is_alive():
+                NN_training_process.start()
+        
+        screen.fill((0,0,0))       
+        track.draw_train(screen, location)
+        track.draw_track(screen)
 
-            # Get prediction instead of confidence levels
-            predictions = model.output_layer_activation.predictions(confidences)
-
-            if(np.max(confidences) > 0.8):
-                 tie_count = 1 + predictions[0]
-            #print(data_array)
-            #print(distance_left_norm, distance_right_norm)
-            #if distance_left_norm < -.97 and distance_right_norm < -0.97:
-            #    new_round_threshold_reached = 1
-            #elif new_round_threshold_reached == 1:
-            #        print("new round")
-            #        filename = "data/roundv2-" + str(roundcount) + ".npy"
-            #        np.save(filename, learning_data)
-            #        roundcount += 1
-            #        learning_data = []               
-            #        new_round_threshold_reached = 0
-
-        screen.fill((0,0,0))
-        draw_track(screen, starting_point, track, scale)
-        train_point = train_position(starting_point, track, tie_count, scale)
-        if train_point is not None:
-            pygame.draw.circle(screen, (255, 0, 0), train_point, 10, 0)
-            prev_train_point = train_point
-        elif prev_train_point is not None:
-            pygame.draw.circle(screen, (255, 0, 0), prev_train_point, 10, 0)
-
-        mouse_pos = pygame.mouse.get_pos()
-        buttons_pressed = sum(pygame.mouse.get_pressed(num_buttons=3))
-        if buttons_pressed > 0:
-            pygame.draw.circle(screen, (0, 0, 255), mouse_pos, 20, 0)
-            find_closet_track(screen, starting_point, mouse_pos, track, scale)
-            
-        #pygame.draw.circle(screen, (red, green, blue), (500, 500), 200, 0)
         pygame.display.flip()
+        clock.tick(FPS)
 
     pygame.quit
 
 if __name__ == "__main__":  
     main()
 
+"""
+TODO: check track similarity also before re-training NN
+
+
+
+"""
