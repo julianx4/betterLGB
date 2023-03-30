@@ -15,10 +15,13 @@ np.set_printoptions(precision=3, floatmode="fixed", suppress=True, linewidth=200
 class Track:
     def __init__(self, filename):
         self.cumulative_angle_average = np.array([])
+        self.track_xcoords = np.array([])
+        self.track_ycoords = np.array([])
+
         self.firsttrack = []
         self.width = 1000
         self.height = 1000
-        self.margin = 100
+        self.margin = 150
         self.startingx = 0
         self.startingy = 0
         self.angle = 0
@@ -29,7 +32,7 @@ class Track:
         self.offset_y = 0
 
         self.sensor_inputs = 12
-        self.output_neurons = 26
+        self.output_neurons = 30
         self.layer_neurons = 60
         self.modelX = np.array([])
         self.modely = np.array([])
@@ -40,19 +43,16 @@ class Track:
         self.model_parameters_queue = multiprocessing.Queue()
         self.rounds_traveled = 0
 
+        self.first_round_data = np.array([])
+        self.first_round_data_stored = 0
+
     def update_track(self, track_array):
-        gyro_array = track_array[:, [10]]
-        gyro_factor = 1
+        gyro_array = track_array[:, [10]] # only check gyro on Z axis
+        gyro_factor = 0.5
         
         cumulative_angle = np.cumsum(gyro_array * gyro_factor)
-        print(gyro_factor,cumulative_angle[-1])
-        while abs(cumulative_angle[-1] - 360) > 0.2 or abs(cumulative_angle[-1] < 0.2):
-            if (cumulative_angle[-1] > 360): #or (cumulative_angle[-1] < 0):
-                gyro_factor += 0.01
-            else:
-                gyro_factor -= 0.01
-            cumulative_angle = np.cumsum(gyro_array * gyro_factor)
-            #print(gyro_factor,cumulative_angle[-1])
+        gyro_factor = 180 / cumulative_angle[-1]
+        cumulative_angle = np.cumsum(gyro_array * gyro_factor)
         
         if self.cumulative_angle_average.size == 0:
             self.cumulative_angle_average = cumulative_angle
@@ -68,49 +68,39 @@ class Track:
             indices_new = np.linspace(0, len(cumulative_angle) - 1, new_length)
             cumulative_angle = np.interp(indices_new, np.arange(len(cumulative_angle)), cumulative_angle)
 
-        similarity = self._check_track_similarity(cumulative_angle, self.firsttrack)
-        #print(similarity)
-        if similarity > 0.97:
-            self.cumulative_angle_average = (cumulative_angle + self.cumulative_angle_average) / 2
-        
+        self.cumulative_angle_average = (cumulative_angle + self.cumulative_angle_average) / 2
+
         self._update_scale_and_offset_factor()
-        return self.cumulative_angle_average
+
+        x_coords = np.cumsum(np.cos(np.radians(self.cumulative_angle_average)))
+        y_coords = np.cumsum(np.sin(np.radians(self.cumulative_angle_average)))
+
+        x_correction = (x_coords[-1] - x_coords[0]) / len(x_coords)
+        y_correction = (y_coords[-1] - y_coords[0]) / len(y_coords)
+
+        x_coords_corrected = x_coords - np.arange(len(x_coords)) * x_correction
+        y_coords_corrected = y_coords - np.arange(len(y_coords)) * y_correction
+
+        x_coords_corrected = -x_coords_corrected * self.scale_factor # changed to - to mirror track
+        y_coords_corrected = y_coords_corrected * self.scale_factor
+        x_coords_corrected += self.offset_x
+        y_coords_corrected += self.offset_y / 2
+
+        self.track_xcoords = x_coords_corrected
+        self.track_ycoords = y_coords_corrected
 
     def draw_track(self, screen):
-        x = self.startingx
-        y = self.startingy
-        for i in range(len(self.cumulative_angle_average)):
-            radians = np.radians(self.cumulative_angle_average[i])
-            
-            delta_x = self.scale_factor * np.cos(radians)
-            delta_y = self.scale_factor * np.sin(radians)
-            xprev = x
-            yprev = y
-            x -= delta_x
-            y += delta_y
-            
-            offset_startpoint = (x + self.offset_x, y + self.offset_y)
-            offset_endpoint = (xprev + self.offset_x, yprev + self.offset_y)
-
-            pygame.draw.line(screen, (255, 255, 255), offset_startpoint, offset_endpoint)
-
+        for i in range(len(self.track_xcoords) - 1):
+            startpoint = (self.track_xcoords[i], self.track_ycoords[i])
+            endpoint = (self.track_xcoords[i + 1], self.track_ycoords[i + 1])
+            pygame.draw.line(screen, (255, 255, 255), startpoint, endpoint, 2)
+                
     def draw_train(self, screen, location):
-        x = self.startingx
-        y = self.startingy
-
-        loopyloop = int(location / self.output_neurons * len(self.cumulative_angle_average))
-
+        loopyloop = int(location / self.output_neurons * len(self.track_xcoords))
+        trainpoint = (self.track_xcoords[0], self.track_ycoords[0])
         for i in range(loopyloop):
-            radians = np.radians(self.cumulative_angle_average[i])
-            
-            delta_x = self.scale_factor * np.cos(radians)
-            delta_y = self.scale_factor * np.sin(radians)
-
-            x -= delta_x
-            y += delta_y
-        offset_trainpoint = (x + self.offset_x, y + self.offset_y)
-            
-        pygame.draw.circle(screen, (255, 0, 255), offset_trainpoint, 10, 0)
+            trainpoint = (self.track_xcoords[i], self.track_ycoords[i])
+        pygame.draw.circle(screen, (255, 0, 255), trainpoint, 10, 0)
 
     def save_track(self):
         np.save(self.filename, self.cumulative_angle_average)
@@ -194,6 +184,21 @@ class Track:
                     track_data_list = []   
                     self.rounds_traveled += 1
 
+    def check_track_similarity(self, arr1, arr2):
+        if len(arr1) < len(arr2):
+            new_length = min(len(arr1), len(arr2))
+            indices_new = np.linspace(0, len(arr2) - 1, new_length)
+            arr2 = np.interp(indices_new, np.arange(len(arr2)), arr2)
+
+        elif len(arr1) > len(arr2):
+            new_length = min(len(arr1), len(arr2))
+            indices_new = np.linspace(0, len(arr1) - 1, new_length)
+            arr1 = np.interp(indices_new, np.arange(len(arr1)), arr1)
+
+        cos_sim = np.dot(arr2, arr1) / (np.linalg.norm(arr2) * np.linalg.norm(arr1)) #another way to compare similarity
+        corr_coef = np.corrcoef(arr1, arr2)[0, 1]
+        return(cos_sim)
+
     def _init_model(self):
         self.model = Model()
         self.model.add(Layer_Dense(self.sensor_inputs, self.layer_neurons))
@@ -205,39 +210,21 @@ class Track:
         self.model.set(loss=Loss_CategoricalCrossentropy(), optimizer=Optimizer_Adam(decay=5e-4), accuracy=Accuracy_Categorical())
         self.model.finalize()
 
-    def _check_track_similarity(self, arr1, arr2):
-        if len(arr1) < len(arr2):
-            new_length = min(len(arr1), len(arr2))
-            indices_new = np.linspace(0, len(arr2) - 1, new_length)
-            arr2 = np.interp(indices_new, np.arange(len(arr2)), arr2)
-
-        elif len(arr1) > len(arr2):
-            new_length = min(len(arr1), len(arr2))
-            indices_new = np.linspace(0, len(arr1) - 1, new_length)
-            arr1 = np.interp(indices_new, np.arange(len(arr1)), arr1)
-
-        #cos_sim = np.dot(arr2, arr1) / (np.linalg.norm(arr2) * np.linalg.norm(arr1)) #another way to compare similarity
-        corr_coef = np.corrcoef(arr1, arr2)[0, 1]
-        return(corr_coef)
-
     def _update_scale_and_offset_factor(self):
-        x = self.startingx
-        y = self.startingy
-        initial_scale_factor = 1
-        x_list = []
-        y_list = []
+        x_coords = np.cumsum(np.cos(np.radians(self.cumulative_angle_average)))
+        y_coords = np.cumsum(np.sin(np.radians(self.cumulative_angle_average)))
 
-        for i in range(len(self.cumulative_angle_average)):
-            radians = np.radians(self.cumulative_angle_average[i])
-            delta_x = initial_scale_factor * np.cos(radians)
-            delta_y = initial_scale_factor * np.sin(radians)
-            x -= delta_x
-            y += delta_y
-            x_list = np.append(x_list, x)
-            y_list = np.append(y_list, y)
+        x_correction = (x_coords[-1] - x_coords[0]) / len(x_coords)
+        y_correction = (y_coords[-1] - y_coords[0]) / len(y_coords)
 
-        x_min, x_max = np.min(x_list), np.max(x_list)
-        y_min, y_max = np.min(y_list), np.max(y_list)
+        x_coords_corrected = x_coords - np.arange(len(x_coords)) * x_correction
+        y_coords_corrected = y_coords - np.arange(len(y_coords)) * y_correction
+
+        x_coords_corrected = -x_coords_corrected
+        y_coords_corrected = y_coords_corrected
+
+        x_min, x_max = np.min(x_coords_corrected), np.max(x_coords_corrected)
+        y_min, y_max = np.min(y_coords_corrected), np.max(y_coords_corrected)
         track_width = x_max - x_min
         track_height = y_max - y_min
         x_scale = (self.width - self.margin * 2) / track_width
@@ -264,6 +251,11 @@ def main():
     screen = pygame.display.set_mode((track.width, track.height))
     clock = pygame.time.Clock()
     FPS = 60
+    font_large = pygame.font.SysFont('Arial', 30)
+    font_small = pygame.font.SysFont('Arial', 15)
+    text_surface_waiting = font_large.render('waiting for train to finish first complete round', True, (255, 255, 255))
+    text_rect_waiting = text_surface_waiting.get_rect()
+    text_rect_waiting.center = (track.width//2, track.height//2 - 100)
 
     location = 0
     sensor_data = []
@@ -271,7 +263,9 @@ def main():
 
     get_sensor_data_process = multiprocessing.Process(target=track.receive_sensor_data,args=(sock,))
     get_sensor_data_process.start()
-    
+
+    similarity = 1 #for the first round I consider that the data is OK to use
+
     running = True
     while running:
         for event in pygame.event.get():
@@ -284,32 +278,45 @@ def main():
             confidences = track.model.predict(sensor_data)
             predictions = track.model.output_layer_activation.predictions(confidences)
 
-            if(np.max(confidences) > 0.9):
+            if(np.max(confidences) > 0.97):
                 location = predictions[0]
-            #print(confidences)
-            
+             
         if not track.full_round_queue.empty():
             full_round_list = np.array(track.full_round_queue.get())
-            track.update_track(full_round_list)
-            NN_training_process = multiprocessing.Process(target=track.update_train_model,args=(full_round_list,))
-            if not NN_training_process.is_alive():
-                NN_training_process.start()
+
+            if track.first_round_data_stored == 0:
+                track.first_round_data = full_round_list
+                track.first_round_data_stored = 1
+
+            if track.first_round_data.shape[0] != 0:
+                gyro_array_first_lap = track.first_round_data[:, [10]].flatten()
+                gyro_array_current_lap = full_round_list[:, [10]].flatten()
+                similarity = track.check_track_similarity(gyro_array_first_lap, gyro_array_current_lap)
+
+            if similarity > 0.95:
+                track.update_track(full_round_list)
+                NN_training_process = multiprocessing.Process(target=track.update_train_model,args=(full_round_list,))
+                if not NN_training_process.is_alive():
+                    NN_training_process.start()
         
         screen.fill((0,0,0))       
-        track.draw_train(screen, location)
-        track.draw_track(screen)
 
+        if track.first_round_data_stored == 1:
+            track.draw_train(screen, location)
+            track.draw_track(screen)
+
+        else:
+            screen.blit(text_surface_waiting, text_rect_waiting)
+
+        text_surface_data = font_small.render(str(sensor_data), True, (255, 255, 255))
+        text_rect_data = text_surface_waiting.get_rect()
+        text_rect_data.center = (track.width //2, track.height - 50)
+        screen.blit(text_surface_data, text_rect_data)
         pygame.display.flip()
         clock.tick(FPS)
 
     pygame.quit
+    get_sensor_data_process.join()
 
 if __name__ == "__main__":  
     main()
-
-"""
-TODO: check track similarity also before re-training NN
-
-
-
-"""
