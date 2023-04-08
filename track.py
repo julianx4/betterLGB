@@ -1,6 +1,7 @@
 import pygame
 import math
 import numpy as np
+from uosc.client import Client
 from uosc.server import parse_message
 import socket
 from nnfs_model import *
@@ -9,6 +10,7 @@ import time
 import matplotlib.pyplot as plt
 import multiprocessing
 import sys
+import pygame_gui
 
 np.set_printoptions(precision=3, floatmode="fixed", suppress=True, linewidth=200)
 
@@ -20,7 +22,7 @@ class Track:
 
         self.firsttrack = []
         self.width = 1000
-        self.height = 1000
+        self.height = 700
         self.margin = 150
         self.startingx = 0
         self.startingy = 0
@@ -32,12 +34,13 @@ class Track:
         self.offset_y = 0
 
         self.sensor_inputs = 12
-        self.output_neurons = 30
+        self.output_neurons = 60
         self.layer_neurons = 60
         self.modelX = np.array([])
         self.modely = np.array([])
         self._init_model()
 
+        self.train_ip_queue = multiprocessing.Queue()
         self.sensor_queue = multiprocessing.Queue()
         self.full_round_queue = multiprocessing.Queue()
         self.model_parameters_queue = multiprocessing.Queue()
@@ -45,6 +48,12 @@ class Track:
 
         self.first_round_data = np.array([])
         self.first_round_data_stored = 0
+
+
+        self.last_time = time.time()
+        self.count = 0
+
+        self.last_data_received = time.time() - 5
 
     def update_track(self, track_array):
         gyro_array = track_array[:, [10]] # only check gyro on Z axis
@@ -139,7 +148,7 @@ class Track:
         
         while True:
             try:
-                pkt = sock.recv(200)
+                pkt, (source_ip, source_port) = sock.recvfrom(200)
                 if not pkt:
                     addr, value = None, None
                 else:
@@ -148,6 +157,7 @@ class Track:
                 addr, value = None, None
 
             if addr == "/sensors":
+                train_ip = source_ip
                 data_array = value
                 distance_right_norm = data_array[0]
                 distance_left_norm = data_array[1]
@@ -163,11 +173,17 @@ class Track:
                 speed_norm = data_array[11]
 
                 self.sensor_queue.put(data_array)
+                self.train_ip_queue.put(train_ip)
+                #print((time.time()-self.last_time) * 1000)
+                #print(data_array)
+                #print(self.count)
+                self.count += 1
+                self.last_time = time.time()
 
                 if start_recording_learningdata == 1:
                     track_data_list.append(data_array)
                 
-                if distance_left_norm < -.96 and distance_right_norm < -0.96:
+                if distance_left_norm < -.94 and distance_right_norm < -0.94:
                     if time.time() - gate_last_measured > 3:
                         print("pillars")
                         new_round_threshold_reached = 1
@@ -180,6 +196,8 @@ class Track:
                     
                     if self.rounds_traveled > 0:
                         self.full_round_queue.put(track_data_list)
+                        filename = "data/tracks/track"+str(self.rounds_traveled)+".npy"
+                        np.save(filename, track_data_list)
 
                     track_data_list = []   
                     self.rounds_traveled += 1
@@ -239,16 +257,29 @@ class Track:
         self.offset_y = y_offset 
         return
 
+
+def toggle_button():
+    global self_drive
+    self_drive = not self_drive
+    if self_drive:
+        button.set_text('selfdrive on')
+    else:
+        button.set_text('selfdrive off')
+
 def main():
     multiprocessing.set_start_method("fork")
     track = Track("data/track.npz")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    
     server_ip = socket.getaddrinfo("0.0.0.0", 9000, socket.AF_INET, socket.SOCK_DGRAM)
+    
     sock.bind(server_ip[0][4])
     sock.setblocking(0)
-    
+    osc = None
+
     pygame.init()
     screen = pygame.display.set_mode((track.width, track.height))
+    gui_manager = pygame_gui.UIManager((track.width, track.height))
     clock = pygame.time.Clock()
     FPS = 60
     font_large = pygame.font.SysFont('Arial', 30)
@@ -256,6 +287,35 @@ def main():
     text_surface_waiting = font_large.render('waiting for train to finish first complete round', True, (255, 255, 255))
     text_rect_waiting = text_surface_waiting.get_rect()
     text_rect_waiting.center = (track.width//2, track.height//2 - 100)
+
+    text_surface_speed = font_large.render('0', True, (255, 255, 255))
+    text_rect_speed = text_surface_speed.get_rect()
+    text_rect_speed.center = (track.width//2 + 100, track.height - 140)
+
+    text_surface_test= font_large.render('0', True, (255, 255, 255))
+    text_rect_test = text_surface_test.get_rect()
+    text_rect_test.center = (track.width//2 + 100, track.height - 300)
+
+    slider_width = 150
+    slider_height = 20
+    slider_position = (track.width//2 + 100, track.height - 100)
+    slider_range = (0, 100)
+    slider_value = 50
+
+    slider = pygame_gui.elements.UIHorizontalSlider(
+        relative_rect=pygame.Rect(slider_position, (slider_width, slider_height)),
+        start_value=slider_value,
+        value_range=slider_range,
+        manager=gui_manager
+    )
+    global button
+    global self_drive
+    self_drive = False
+    button = pygame_gui.elements.UIButton(
+        relative_rect=pygame.Rect((track.width // 2 + 105, track.height - 200), (150, 50)),
+        text='selfdrive off',
+        manager=gui_manager
+    )
 
     location = 0
     sensor_data = []
@@ -266,19 +326,36 @@ def main():
 
     similarity = 1 #for the first round I consider that the data is OK to use
 
+    speed = 0.5 #0.5 is stopped
+    last_speed = 0.5
+
     running = True
     while running:
+        time_delta = clock.tick(FPS) / 1000.0
+        if not track.train_ip_queue.empty():
+            train_ip = track.train_ip_queue.get()
+            if not osc:
+                osc = Client((train_ip, 9001))
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            gui_manager.process_events(event)
+        # Check for the UI_BUTTON_PRESSED event and call toggle_button() function
+            if event.type == pygame.USEREVENT:
+                if event.user_type == pygame_gui.UI_BUTTON_PRESSED:
+                    if event.ui_element == button:
+                        toggle_button()
+
         if not track.model_parameters_queue.empty():
             track.model.set_parameters(track.model_parameters_queue.get())
+
         if not track.sensor_queue.empty():
+            track.last_data_received = time.time()
             sensor_data = np.array(track.sensor_queue.get())
             confidences = track.model.predict(sensor_data)
             predictions = track.model.output_layer_activation.predictions(confidences)
-
-            if(np.max(confidences) > 0.97):
+            if(np.max(confidences) > 0.97): 
                 location = predictions[0]
              
         if not track.full_round_queue.empty():
@@ -299,7 +376,13 @@ def main():
                 if not NN_training_process.is_alive():
                     NN_training_process.start()
         
+        gui_manager.update(time_delta)
         screen.fill((0,0,0))       
+
+        if time.time() - track.last_data_received > 2:
+            pygame.draw.circle(screen, (255, 0, 0), (track.width - 50, 50), 10, 0)
+        else:
+            pygame.draw.circle(screen, (0, 255, 0), (track.width - 50, 50), 10, 0)
 
         if track.first_round_data_stored == 1:
             track.draw_train(screen, location)
@@ -308,15 +391,36 @@ def main():
         else:
             screen.blit(text_surface_waiting, text_rect_waiting)
 
+        gui_manager.draw_ui(screen)
+        text_surface_speed = font_small.render("speed: "+str(speed), True, (255, 255, 255))
+        text_rect_speed = text_surface_speed.get_rect()
+        text_rect_speed.center = (track.width //2 + 175, track.height - 130)
+
         text_surface_data = font_small.render(str(sensor_data), True, (255, 255, 255))
         text_rect_data = text_surface_waiting.get_rect()
         text_rect_data.center = (track.width //2, track.height - 50)
-        screen.blit(text_surface_data, text_rect_data)
-        pygame.display.flip()
-        clock.tick(FPS)
 
-    pygame.quit
-    get_sensor_data_process.join()
+        screen.blit(text_surface_data, text_rect_data)
+        screen.blit(text_surface_speed, text_rect_speed)
+        speed = slider.get_current_value() / 100
+
+        if self_drive:
+            if track.first_round_data_stored == 1:
+                if 0 <= location <= track.output_neurons / 10:
+                    speed = 0.7
+                else:
+                    speed = 1
+            else:
+                speed = 1
+        if speed != last_speed:
+            if osc:
+                osc.send('/speed', speed)
+        last_speed = speed
+
+        pygame.display.flip()
+
+    pygame.quit()
+    get_sensor_data_process.kill()
 
 if __name__ == "__main__":  
     main()

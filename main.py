@@ -17,11 +17,19 @@ import rp2
 import wifi
 import sys
 import uio
+import _thread
+import gc
 print("imports done")
+gc.collect()
+free_mem = gc.mem_free()
+print("Available RAM: {} bytes".format(free_mem))
+
+s_lock = _thread.allocate_lock()
 
 ENA = 0
 IN1 = 1
 IN2 = 2
+
 
 left_sensor_power = 13
 right_sensor_power = 15
@@ -52,6 +60,7 @@ class SensorPackage:
     def __init__(self):
         self.left_sensor_power = Pin(left_sensor_power, Pin.OUT)
         self.right_sensor_power = Pin(right_sensor_power, Pin.OUT)
+
         self.i2c = board.I2C()
         self.spi = board.SPI()
         self.cs = digitalio.DigitalInOut(board.GP5)
@@ -59,6 +68,8 @@ class SensorPackage:
 
         self.optical_flow = paa5100ej.PAA5100EJ(self.spi, self.cs)
         self.optical_flow.set_rotation(0)
+        self.motiondata = 0, 0
+        self.motionx, self.motiony = self.motiondata
 
 
         self.right_sensor_power.on()
@@ -86,7 +97,6 @@ class SensorPackage:
         self.distance_sensor_left.timing_budget = 33
         self.distance_sensor_right.timing_budget = 33
 
-        
         print(self.i2c.scan())
 
         self.magneto_sensor = MPU9250(self.i2c, mpu_addr=0x68)
@@ -100,10 +110,37 @@ class SensorPackage:
         self.magnetoy = 0
 
         self.speed = 0
+        free_mem = gc.mem_free()
+        print("Available RAM: {} bytes".format(free_mem))
+        gc.collect()
+        free_mem = gc.mem_free()
+        print("Available RAM: {} bytes".format(free_mem))
+        self.start_read_motion_sensor_thread()
 
+    def start_read_motion_sensor_thread(self):
+        time.sleep_ms(200)
+        print("attempting to start thread")
+        while True:
+            try:
+                _thread.start_new_thread(self.read_motion_sensor, ())
+                break
+            except Exception as e:
+                print(e)
+                print("trying again....")
+                gc.collect()
+                time.sleep_ms(40)
+        print("thread started")
+        time.sleep_ms(200)
         
+    def read_motion_sensor(self):
+        while True:
+            temp_motion_data = self.optical_flow.get_motion(5)
+            #print("bla")
+            s_lock.acquire()
+            self.motiondata = temp_motion_data
+            s_lock.release()
+            
         
-
     def read_sensors(self):
         self.distance_right = self.distance_sensor_right.distance
         self.distance_left = self.distance_sensor_left.distance
@@ -116,13 +153,14 @@ class SensorPackage:
         self.magneto = self.magneto_sensor.magnetic
         self.gyro = self.magneto_sensor.gyro
         self.acceleration = self.magneto_sensor.acceleration
-        
-        motiondata = self.optical_flow.get_motion(0.5)
-        if motiondata is not None:
-            x, y = motiondata
-        else:
-            x, y = 0, 0
-        self.speed = math.sqrt(x ** 2 + y ** 2)
+        if not s_lock.locked():
+            s_lock.acquire()
+            if self.motiondata is not None:
+                self.motionx, self.motiony = self.motiondata
+            s_lock.release()
+
+        #print(x,y, dr, raw_sum, raw_max, raw_min, obs)
+        self.speed = math.sqrt(self.motionx ** 2 + self.motiony ** 2)
 
         self.distance_right_norm = (self.distance_right / 400) - 1
         self.distance_left_norm = (self.distance_left / 400) - 1
@@ -175,7 +213,7 @@ def read_packet(sock):
             return addr, value
     except:
         return None, None
-       
+
 def main():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -211,6 +249,7 @@ def main():
                     speed = 0
                 print(speed)
 
+
         sensor_package.read_sensors()
         #print("left: ",sensor_package.distance_left_norm, "right: ",sensor_package.distance_right_norm)
         osc.send('/sensors',sensor_package.distance_right_norm, sensor_package.distance_left_norm, \
@@ -223,7 +262,7 @@ def main():
 if __name__ == "__main__":
     while True:
         try:
-            log_file = open("error.log", "a")
+            log_file = open("error.log", "w")
             main()
         except Exception as e:
             # Catch the exception and write the error message to the log file
